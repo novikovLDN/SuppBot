@@ -1,0 +1,198 @@
+// Atlas Secure — support bot data model
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// Dashboard user: an operator or admin who answers tickets.
+model Operator {
+  id           Int      @id @default(autoincrement())
+  username     String   @unique
+  passwordHash String
+  displayName  String
+  role         Role     @default(OPERATOR)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  lastSeenAt   DateTime?
+
+  assignedTickets Ticket[]  @relation("AssignedOperator")
+  messages        Message[]
+  pushSubscriptions PushSubscription[]
+  jiraTasks       JiraTask[]
+
+  @@index([isActive])
+}
+
+enum Role {
+  ADMIN
+  OPERATOR
+}
+
+/// A Telegram end user who writes to support.
+model Customer {
+  id           BigInt   @id // Telegram user id
+  username     String?
+  firstName    String?
+  lastName     String?
+  languageCode String?
+  createdAt    DateTime @default(now())
+
+  tickets Ticket[]
+
+  @@index([username])
+}
+
+/// A support conversation. Display number = id + NUMBER_OFFSET.
+model Ticket {
+  id         Int          @id @default(autoincrement())
+  customer   Customer     @relation(fields: [customerId], references: [id])
+  customerId BigInt
+  status     TicketStatus @default(OPEN)
+
+  assignedOperator   Operator? @relation("AssignedOperator", fields: [assignedOperatorId], references: [id])
+  assignedOperatorId Int?
+
+  subject String? // short snippet from the first message
+
+  createdAt     DateTime  @default(now())
+  closedAt      DateTime?
+  lastMessageAt DateTime  @default(now())
+
+  // unread counters drive the dashboard badges
+  unreadForOperator Int @default(0)
+
+  // the customer may use the "Дополнить тикет" action exactly once per ticket
+  supplemented Boolean @default(false)
+
+  // customer-facing persona name + whether the "taken into work" notice was sent
+  assignedName  String?
+  claimNotified Boolean @default(false)
+
+  // post-close quality rating from the customer (1..5 stars)
+  rating  Int?
+  ratedAt DateTime?
+
+  // smart queue
+  priority       Priority  @default(NORMAL)
+  tags           String[]  @default([])
+  // when the current unanswered wait started (null = answered / no pending wait)
+  firstWaitingAt DateTime?
+
+  messages  Message[]
+  jiraTasks JiraTask[]
+
+  // Fast lookups: the customer's currently-open ticket, queue ordering, filters.
+  @@index([customerId, status])
+  @@index([status, assignedOperatorId, lastMessageAt])
+  @@index([assignedOperatorId, status])
+  @@index([lastMessageAt])
+  @@index([ratedAt])
+}
+
+enum TicketStatus {
+  OPEN
+  CLOSED
+}
+
+enum Priority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+model Message {
+  id         BigInt    @id @default(autoincrement())
+  ticket     Ticket    @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  ticketId   Int
+  sender     Sender
+  operator   Operator? @relation(fields: [operatorId], references: [id])
+  operatorId Int?
+
+  text String? @db.Text
+
+  // internal note: visible to operators only, never delivered to the customer
+  internal Boolean @default(false)
+
+  // Media: telegram file_id + kind ("photo" | "document" | "video" | "voice"), optional.
+  mediaType   String?
+  mediaFileId String?
+  fileName    String?
+
+  telegramMessageId Int?
+  createdAt         DateTime @default(now())
+
+  @@index([ticketId, createdAt])
+}
+
+enum Sender {
+  CUSTOMER
+  OPERATOR
+  SYSTEM
+}
+
+/// Web Push subscription for an operator's browser / installed PWA.
+model PushSubscription {
+  id         Int      @id @default(autoincrement())
+  operator   Operator @relation(fields: [operatorId], references: [id], onDelete: Cascade)
+  operatorId Int
+  endpoint   String   @unique
+  p256dh     String
+  auth       String
+  createdAt  DateTime @default(now())
+
+  @@index([operatorId])
+}
+
+/// Reusable canned reply ("шаблон"). Shared across operators.
+model Template {
+  id          Int      @id @default(autoincrement())
+  name        String
+  text        String   @db.Text
+  category    String?
+  usageCount  Int      @default(0)
+  pinned      Boolean  @default(false)
+  createdById Int?
+  createdAt   DateTime @default(now())
+
+  @@index([name])
+  @@index([pinned, usageCount])
+}
+
+/// An internal Jira-style task raised from a support ticket. Not connected to a
+/// real Atlassian instance — a lightweight board that lives in this dashboard.
+model JiraTask {
+  id       Int    @id @default(autoincrement())
+  key      String @unique // human key, e.g. "JIRA-42"
+
+  ticket   Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  ticketId Int
+
+  // Problem summary + fuller context lifted from the chat.
+  title       String
+  description String? @db.Text
+  // Operator's comment captured when the task is created.
+  comment     String? @db.Text
+
+  status JiraStatus @default(WAITING)
+
+  createdBy     Operator? @relation(fields: [createdById], references: [id])
+  createdById   Int?
+  createdByName String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status, createdAt])
+  @@index([ticketId])
+}
+
+enum JiraStatus {
+  WAITING
+  IN_PROGRESS
+  DONE
+}
